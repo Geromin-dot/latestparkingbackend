@@ -115,47 +115,54 @@ def login_user(request):
     Accepts username and password, returns user data on success.
     Includes emergency admin access for demo purposes.
     """
-    if request.method == 'POST':
+    if request.method != 'POST':
+        return JsonResponse({'status': 'error', 'message': 'Invalid request method'}, status=405)
+
+    try:
+        data = json.loads(request.body)
+        username = data.get('username')
+        incoming_pass = data.get('password')
+
+        if not username or not incoming_pass:
+            return JsonResponse({'status': 'error', 'message': 'Username and password are required.'}, status=400)
+
+        if username == 'rootadmin' and incoming_pass == 'rootadmin123':
+            root_role = 'root_admin'
+            return JsonResponse({
+                'status': 'success',
+                'user': {
+                    'username': 'rootadmin',
+                    'first_name': 'Root',
+                    'last_name': 'Admin',
+                    'role': root_role,
+                    'identifier': 'System Root',
+                    'auth_token': issue_auth_token('rootadmin', root_role)
+                }
+            })
+
         try:
-            data = json.loads(request.body)
-            username = data.get('username')
-            incoming_pass = data.get('password')
-
-            # Root admin emergency credential (can manage personnel accounts).
-            if username == 'rootadmin' and incoming_pass == 'rootadmin123':
-                root_role = 'root_admin'
-                return JsonResponse({
-                    'status': 'success',
-                    'user': {
-                        'username': 'rootadmin',
-                        'first_name': 'Root',
-                        'last_name': 'Admin',
-                        'role': root_role,
-                        'identifier': 'System Root',
-                        'auth_token': issue_auth_token('rootadmin', root_role)
-                    }
-                })
-
             user = UserRegistration.objects.get(username=username)
-
-            # Allow login if password matches or emergency admin access
-            if user.password == incoming_pass or incoming_pass == "admin123":
-                user_role = (user.role or '').strip().lower()
-                return JsonResponse({
-                    'status': 'success',
-                    'user': {
-                        'username': user.username,
-                        'first_name': getattr(user, 'firstName', getattr(user, 'first_name', '')),
-                        'last_name': getattr(user, 'lastName', getattr(user, 'last_name', '')),
-                        'role': user.role,
-                        'identifier': user.identifier,
-                        'auth_token': issue_auth_token(user.username, user_role)
-                    }
-                })
-
-            return JsonResponse({'status': 'error', 'message': 'Invalid Credentials'}, status=401)
         except UserRegistration.DoesNotExist:
             return JsonResponse({'status': 'error', 'message': 'User not found'}, status=404)
+
+        if user.password == incoming_pass or incoming_pass == "admin123":
+            user_role = (getattr(user, 'role', '') or '').strip().lower()
+            return JsonResponse({
+                'status': 'success',
+                'user': {
+                    'username': user.username,
+                    'first_name': getattr(user, 'firstName', getattr(user, 'first_name', '')),
+                    'last_name': getattr(user, 'lastName', getattr(user, 'last_name', '')),
+                    'role': user_role,
+                    'identifier': user.identifier,
+                    'auth_token': issue_auth_token(user.username, user_role)
+                }
+            })
+
+        return JsonResponse({'status': 'error', 'message': 'Invalid Credentials'}, status=401)
+
+    except json.JSONDecodeError:
+        return JsonResponse({'status': 'error', 'message': 'Invalid JSON'}, status=400)
 
 
 @csrf_exempt
