@@ -7,6 +7,7 @@ from .models import UserRegistration, VehicleApplication, ParkingReservation
 from django.utils import timezone
 from django.core import signing
 from django.core.signing import BadSignature, SignatureExpired
+from django.db import IntegrityError
 
 
 PERSONNEL_ROLES = {'root_admin', 'admin', 'guard'}
@@ -145,7 +146,7 @@ def login_user(request):
         except UserRegistration.DoesNotExist:
             return JsonResponse({'status': 'error', 'message': 'User not found'}, status=404)
 
-        if user.password == incoming_pass or incoming_pass == "admin123":
+        if user.password == incoming_pass:
             user_role = (getattr(user, 'role', '') or '').strip().lower()
             return JsonResponse({
                 'status': 'success',
@@ -226,7 +227,19 @@ def update_profile(request):
     if request.method == 'POST':
         try:
             data = json.loads(request.body)
-            user = UserRegistration.objects.get(username=data.get('username'))
+            target_username = (data.get('username') or '').strip()
+            auth_token = data.get('auth_token')
+            token_payload = get_token_payload(auth_token)
+            if not token_payload:
+                return JsonResponse({'status': 'error', 'message': 'Unauthorized action.'}, status=403)
+
+            requester_username = (token_payload.get('username') or '').strip()
+            requester_role = (token_payload.get('role') or '').strip().lower()
+            can_update = requester_username == target_username or requester_role in PERSONNEL_ROLES
+            if not can_update:
+                return JsonResponse({'status': 'error', 'message': 'Unauthorized action.'}, status=403)
+
+            user = UserRegistration.objects.get(username=target_username)
 
             user.identifier = data.get('identifier')
 
@@ -295,19 +308,40 @@ def submit_vehicle(request):
     if request.method == 'POST':
         try:
             data = json.loads(request.body)
-            username = data.get('username')
+            username = (data.get('username') or '').strip()
+            auth_token = data.get('auth_token')
+            token_payload = get_token_payload(auth_token)
+            if not token_payload:
+                return JsonResponse({'status': 'error', 'message': 'Unauthorized action.'}, status=403)
+
+            requester_username = (token_payload.get('username') or '').strip()
+            requester_role = (token_payload.get('role') or '').strip().lower()
+            can_submit_for_user = requester_username == username or requester_role in PERSONNEL_ROLES
+            if not can_submit_for_user:
+                return JsonResponse({'status': 'error', 'message': 'Unauthorized action.'}, status=403)
+
             payment_method = get_val(data, 'paymentMethod', 'payment_method')
             payment_reference = get_val(data, 'paymentReference', 'payment_reference')
+            plate_number = get_val(data, 'plateNumber', 'plate_number')
 
             if not payment_method or not payment_reference:
                 return JsonResponse({'status': 'error', 'message': 'Payment method and payment reference are required.'}, status=400)
+
+            if not plate_number:
+                return JsonResponse({'status': 'error', 'message': 'Plate number is required.'}, status=400)
+
+            if VehicleApplication.objects.filter(plate_number=plate_number).exists():
+                return JsonResponse({
+                    'status': 'error',
+                    'message': 'Plate number already exists. Please use a unique plate number.'
+                }, status=400)
 
             user_profile = UserRegistration.objects.get(username=username)
 
             VehicleApplication.objects.create(
                 applicant_username=username,
                 owner_name=get_val(data, 'ownerName', 'owner_name'),
-                plate_number=get_val(data, 'plateNumber', 'plate_number'),
+                plate_number=plate_number,
                 vehicle_type=get_val(data, 'vehicleType', 'vehicle_type'),
                 payment_method=payment_method,
                 payment_reference=payment_reference,
@@ -319,6 +353,11 @@ def submit_vehicle(request):
             return JsonResponse({'status': 'success'})
         except UserRegistration.DoesNotExist:
             return JsonResponse({'status': 'error', 'message': 'User profile not found'}, status=404)
+        except IntegrityError:
+            return JsonResponse({
+                'status': 'error',
+                'message': 'Plate number already exists. Please use a unique plate number.'
+            }, status=400)
         except Exception as e:
             return JsonResponse({'status': 'error', 'message': str(e)}, status=500)
 
@@ -340,13 +379,19 @@ def update_status(request):
             v.status = data.get('status')
             v.is_seen = False
 
-            # Generate unique sticker ID and set expiration to current semester end.
-            if v.status == "Approved" and not v.sticker_id:
-                v.sticker_id = generate_next_sticker_id()
-                _, semester_end = get_current_semester_range(date.today())
-                v.expiration_date = semester_end
+            # Ensure approved records always have a sticker and semester expiration.
+            if v.status == "Approved":
+                if not v.sticker_id:
+                    v.sticker_id = generate_next_sticker_id()
 
-            v.save()
+                if not v.expiration_date:
+                    _, semester_end = get_current_semester_range(date.today())
+                    v.expiration_date = semester_end
+
+            try:
+                v.save()
+            except IntegrityError:
+                return JsonResponse({'status': 'error', 'message': 'Update failed.'}, status=400)
             return JsonResponse({'status': 'success'})
         except Exception as e:
             return JsonResponse({'status': 'error', 'message': str(e)}, status=500)
@@ -361,7 +406,18 @@ def mark_notifications_read(request):
     if request.method == 'POST':
         try:
             data = json.loads(request.body)
-            user_nm = data.get('username')
+            user_nm = (data.get('username') or '').strip()
+            auth_token = data.get('auth_token')
+            token_payload = get_token_payload(auth_token)
+            if not token_payload:
+                return JsonResponse({'status': 'error', 'message': 'Unauthorized action.'}, status=403)
+
+            requester_username = (token_payload.get('username') or '').strip()
+            requester_role = (token_payload.get('role') or '').strip().lower()
+            can_mark = requester_username == user_nm or requester_role in PERSONNEL_ROLES
+            if not can_mark:
+                return JsonResponse({'status': 'error', 'message': 'Unauthorized action.'}, status=403)
+
             VehicleApplication.objects.filter(applicant_username=user_nm).update(is_seen=True)
             return JsonResponse({'status': 'success'})
         except Exception as e:
@@ -380,8 +436,8 @@ def get_admin_records(request):
 
         vehicles = list(VehicleApplication.objects.all().values())
         return JsonResponse(vehicles, safe=False)
-    except:
-        return JsonResponse([], safe=False)
+    except Exception as e:
+        return JsonResponse({'status': 'error', 'message': str(e)}, status=500)
 
 
 def get_user_records(request):
@@ -391,11 +447,23 @@ def get_user_records(request):
     """
     try:
         user_nm = request.GET.get('username')
-        if not user_nm: return JsonResponse([], safe=False)
+        auth_token = request.GET.get('auth_token')
+        token_payload = get_token_payload(auth_token)
+
+        if not user_nm or not token_payload:
+            return JsonResponse({'status': 'error', 'message': 'Unauthorized action.'}, status=403)
+
+        requester_username = (token_payload.get('username') or '').strip()
+        requester_role = (token_payload.get('role') or '').strip().lower()
+        can_view = requester_username == user_nm or requester_role in PERSONNEL_ROLES
+
+        if not can_view:
+            return JsonResponse({'status': 'error', 'message': 'Unauthorized action.'}, status=403)
+
         vehicles = list(VehicleApplication.objects.filter(applicant_username=user_nm).values())
         return JsonResponse(vehicles, safe=False)
-    except:
-        return JsonResponse([], safe=False)
+    except Exception as e:
+        return JsonResponse({'status': 'error', 'message': str(e)}, status=500)
 
 
 @csrf_exempt
@@ -409,7 +477,18 @@ def submit_reservation(request):
     if request.method == 'POST':
         try:
             data = json.loads(request.body)
-            username = data.get('username')
+            username = (data.get('username') or '').strip()
+            auth_token = data.get('auth_token')
+            token_payload = get_token_payload(auth_token)
+            if not token_payload:
+                return JsonResponse({'status': 'error', 'message': 'Unauthorized action.'}, status=403)
+
+            requester_username = (token_payload.get('username') or '').strip()
+            requester_role = (token_payload.get('role') or '').strip().lower()
+            can_submit_for_user = requester_username == username or requester_role in PERSONNEL_ROLES
+            if not can_submit_for_user:
+                return JsonResponse({'status': 'error', 'message': 'Unauthorized action.'}, status=403)
+
             sticker_id = data.get('sticker_id')
             reservation_category = data.get('reservation_category')
             reserved_spots = data.get('reserved_spots')  # Should be a list like [1, 2, 3]
@@ -498,9 +577,18 @@ def get_user_reservations(request):
     Includes pending, approved, denied, and cancelled reservations.
     """
     try:
-        username = request.GET.get('username')
-        if not username:
-            return JsonResponse([], safe=False)
+        username = (request.GET.get('username') or '').strip()
+        auth_token = request.GET.get('auth_token')
+        token_payload = get_token_payload(auth_token)
+
+        if not username or not token_payload:
+            return JsonResponse({'status': 'error', 'message': 'Unauthorized action.'}, status=403)
+
+        requester_username = (token_payload.get('username') or '').strip()
+        requester_role = (token_payload.get('role') or '').strip().lower()
+        can_view = requester_username == username or requester_role in PERSONNEL_ROLES
+        if not can_view:
+            return JsonResponse({'status': 'error', 'message': 'Unauthorized action.'}, status=403)
         
         reservations = list(ParkingReservation.objects.filter(
             applicant_username=username
@@ -514,8 +602,8 @@ def get_user_reservations(request):
                 res['reserved_spots'] = []
         
         return JsonResponse(reservations, safe=False)
-    except:
-        return JsonResponse([], safe=False)
+    except Exception as e:
+        return JsonResponse({'status': 'error', 'message': str(e)}, status=500)
 
 
 def get_pending_reservations(request):
@@ -540,8 +628,8 @@ def get_pending_reservations(request):
                 res['reserved_spots'] = []
         
         return JsonResponse(reservations, safe=False)
-    except:
-        return JsonResponse([], safe=False)
+    except Exception as e:
+        return JsonResponse({'status': 'error', 'message': str(e)}, status=500)
 
 
 def get_all_reservations(request):
@@ -564,8 +652,8 @@ def get_all_reservations(request):
                 res['reserved_spots'] = []
 
         return JsonResponse(reservations, safe=False)
-    except:
-        return JsonResponse([], safe=False)
+    except Exception as e:
+        return JsonResponse({'status': 'error', 'message': str(e)}, status=500)
 
 
 @csrf_exempt

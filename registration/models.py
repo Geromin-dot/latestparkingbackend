@@ -31,7 +31,7 @@ class VehicleApplication(models.Model):
     # Application Details
     applicant_username = models.CharField(max_length=100)  # Links to UserRegistration
     owner_name = models.TextField()  # DES encrypted owner name
-    plate_number = models.TextField()  # DES encrypted plate number
+    plate_number = models.TextField(unique=True)  # DES encrypted plate number
     vehicle_type = models.CharField(max_length=50)  # '2-Wheels', '4-Wheels', 'Service'
     payment_method = models.CharField(max_length=50, blank=True, null=True)
     payment_reference = models.CharField(max_length=100, blank=True, null=True)
@@ -41,7 +41,7 @@ class VehicleApplication(models.Model):
     is_seen = models.BooleanField(default=True)  # Whether user has seen status update
 
     # Sticker Information (Set upon approval)
-    sticker_id = models.CharField(max_length=20, blank=True, null=True)  # Format: UA-001, UA-002, etc.
+    sticker_id = models.CharField(max_length=20, blank=True, null=True, unique=True)  # Format: UA-001, UA-002, etc.
     expiration_date = models.DateField(blank=True, null=True)  # Sticker expires 1 year from approval
 
     # Metadata
